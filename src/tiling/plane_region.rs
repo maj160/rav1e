@@ -226,7 +226,7 @@ macro_rules! plane_region_common {
         }
       }
 
-      pub fn vert_windows(&self, h: usize) -> VertWindows<'_, T> {
+      pub fn vert_windows(&self, h: usize) -> VertWindows<'a, T> {
         VertWindows {
           data: self.data,
           plane_cfg: self.plane_cfg,
@@ -240,7 +240,7 @@ macro_rules! plane_region_common {
         }
       }
 
-      pub fn horz_windows(&self, w: usize) -> HorzWindows<'_, T> {
+      pub fn horz_windows(&self, w: usize) -> HorzWindows<'a, T> {
         HorzWindows {
           data: self.data,
           plane_cfg: self.plane_cfg,
