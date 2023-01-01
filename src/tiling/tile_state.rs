@@ -150,6 +150,13 @@ impl<'a, T: Pixel> TileStateMut<'a, T> {
     let sb_width = width.align_power_of_two_and_shift(sb_size_log2);
     let sb_height = height.align_power_of_two_and_shift(sb_size_log2);
 
+    // If there is more than one strong count, we end up cloning 
+    // the whole frame. Don't panic in release, but this indicates a bug
+    // debug_assert!(Arc::strong_count(&fs.rec) == 1);
+    // Seems to occur whenever we use TileContextIterMut in parallel
+    // Isn't this very bad? TODO fix if necessary
+    let rec = TileMut::new(Arc::make_mut(&mut fs.rec), luma_rect);
+
     Self {
       sbo,
       sb_size_log2,
@@ -164,7 +171,7 @@ impl<'a, T: Pixel> TileStateMut<'a, T> {
       input_hres: &fs.input_hres,
       input_qres: &fs.input_qres,
       deblock: &fs.deblock,
-      rec: TileMut::new(Arc::make_mut(&mut fs.rec), luma_rect),
+      rec,
       qc: Default::default(),
       segmentation: &fs.segmentation,
       restoration: TileRestorationStateMut::new(
