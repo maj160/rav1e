@@ -62,6 +62,22 @@ macro_rules! declare_asm_satd_hbd_fn {
   )
 }
 
+macro_rules! declare_asm_dist_xN_fn {
+  ($(($name: ident, $T: ident)),+) => (
+    $(
+      extern { fn $name (
+        src: *const $T, src_stride: isize, dst: *const $T, dst_stride: isize, n_rows : usize,
+      ) -> u32; }
+    )+
+  )
+}
+
+declare_asm_dist_xN_fn![
+  (rav1e_sad_16xN_hbd_avx2, u16),
+  (rav1e_sad_32xN_hbd_avx2, u16),
+  (rav1e_sad_64xN_hbd_avx2, u16)
+];
+
 declare_asm_dist_fn![
   // SSSE3
   (rav1e_sad_4x4_hbd_ssse3, u16),
@@ -93,19 +109,6 @@ declare_asm_dist_fn![
   // SSE4
   (rav1e_satd_4x4_sse4, u8),
   // AVX
-  (rav1e_sad16x4_hbd_avx2, u16),
-  (rav1e_sad16x8_hbd_avx2, u16),
-  (rav1e_sad16x16_hbd_avx2, u16),
-  (rav1e_sad16x32_hbd_avx2, u16),
-  (rav1e_sad16x64_hbd_avx2, u16),
-  (rav1e_sad32x8_hbd_avx2, u16),
-  (rav1e_sad32x16_hbd_avx2, u16),
-  (rav1e_sad32x32_hbd_avx2, u16),
-  (rav1e_sad32x64_hbd_avx2, u16),
-  (rav1e_sad64x16_hbd_avx2, u16),
-  (rav1e_sad64x32_hbd_avx2, u16),
-  (rav1e_sad64x64_hbd_avx2, u16),
-  (rav1e_sad64x128_hbd_avx2, u16),
 
   (rav1e_sad32x8_avx2, u8),
   (rav1e_sad32x16_avx2, u8),
@@ -313,32 +316,6 @@ macro_rules! get_sad_hbd_ssse3 {
   }
 }
 
-macro_rules! get_sad_hbd_avx2 {
-  ($(($W:expr, $H:expr, $BS:expr)),*) => {
-    $(
-      paste::item! {
-        #[target_feature(enable = "avx2")]
-        unsafe extern fn [<rav1e_sad $W x $H _hbd_avx2>](
-          src: *const u16, src_stride: isize, dst: *const u16, dst_stride: isize,
-        ) -> u32 {
-          let mut sum = 0;
-          for w in (0..$W).step_by($BS) {
-            for h in (0..$H).step_by($BS) {
-              sum += [<rav1e_sad $BS x $BS _hbd_avx2>](
-                src.offset(w + h * src_stride / 2),
-                src_stride,
-                dst.offset(w + h * dst_stride / 2),
-                dst_stride
-              );
-            }
-          }
-          sum
-        }
-      }
-    )*
-  }
-}
-
 get_sad_hbd_ssse3!(
   // 4x4 base
   (8, 8, 4),
@@ -363,10 +340,73 @@ get_sad_hbd_ssse3!(
   (64, 16, 16)
 );
 
+macro_rules! get_sad_hbd_avx2_WxN {
+  ($(($W:expr, $H:expr)),*) => {
+    $(
+      paste::item! {
+        #[target_feature(enable = "avx2")]
+        unsafe extern fn [<rav1e_sad_ $W x $H _hbd_avx2>](
+          src: *const u16, src_stride: isize, dst: *const u16, dst_stride: isize,
+        ) -> u32 {
+          [<rav1e_sad_ $W x N _hbd_avx2>](
+                src,
+                src_stride,
+                dst,
+                dst_stride,
+                $H,
+              )
+        }
+      }
+    )*
+  }
+}
+
+get_sad_hbd_avx2_WxN!(
+  (16,4),
+  (16,8),
+  (16,16),
+  (16,32),
+  (16,64),
+  (32,8),
+  (32,16),
+  (32,32),
+  (32,64),
+  (64,16),
+  (64,32),
+  (64,64),
+  (64,128)
+);
+
+macro_rules! get_sad_hbd_avx2 {
+  ($(($W:expr, $H:expr, $BS:expr)),*) => {
+    $(
+      paste::item! {
+        #[target_feature(enable = "avx2")]
+        unsafe extern fn [<rav1e_sad_ $W x $H _hbd_avx2>](
+          src: *const u16, src_stride: isize, dst: *const u16, dst_stride: isize,
+        ) -> u32 {
+          let mut sum = 0;
+          for w in (0..$W).step_by($BS) {
+            for h in (0..$H).step_by($BS) {
+              sum += [<rav1e_sad_ $BS x $BS _hbd_avx2>](
+                src.offset(w + h * src_stride / 2),
+                src_stride,
+                dst.offset(w + h * dst_stride / 2),
+                dst_stride
+              );
+            }
+          }
+          sum
+        }
+      }
+    )*
+  }
+}
+
 get_sad_hbd_avx2!(
   // 64x64 base
-  (128, 128, 32),
-  (128, 64, 32)
+  (128, 128, 64),
+  (128, 64, 64)
 );
 
 static SAD_FNS_SSE2: [Option<SadFn>; DIST_FNS_LENGTH] = {
@@ -485,23 +525,23 @@ static SAD_HBD_FNS_AVX2: [Option<SadHBDFn>; DIST_FNS_LENGTH] = {
 
   use BlockSize::*;
 
-  out[BLOCK_16X16 as usize] = Some(rav1e_sad16x16_hbd_avx2);
-  out[BLOCK_32X32 as usize] = Some(rav1e_sad32x32_hbd_avx2);
-  out[BLOCK_64X64 as usize] = Some(rav1e_sad64x64_hbd_avx2);
-  out[BLOCK_128X128 as usize] = Some(rav1e_sad128x128_hbd_avx2);
+  out[BLOCK_16X16 as usize] = Some(rav1e_sad_16x16_hbd_avx2);
+  out[BLOCK_32X32 as usize] = Some(rav1e_sad_32x32_hbd_avx2);
+  out[BLOCK_64X64 as usize] = Some(rav1e_sad_64x64_hbd_avx2);
+  out[BLOCK_128X128 as usize] = Some(rav1e_sad_128x128_hbd_avx2);
 
-  out[BLOCK_16X8 as usize] = Some(rav1e_sad16x8_hbd_avx2);
-  out[BLOCK_16X32 as usize] = Some(rav1e_sad16x32_hbd_avx2);
-  out[BLOCK_32X16 as usize] = Some(rav1e_sad32x16_hbd_avx2);
-  out[BLOCK_32X64 as usize] = Some(rav1e_sad32x64_hbd_avx2);
-  out[BLOCK_64X32 as usize] = Some(rav1e_sad64x32_hbd_avx2);
-  out[BLOCK_64X128 as usize] = Some(rav1e_sad64x128_hbd_avx2);
-  out[BLOCK_128X64 as usize] = Some(rav1e_sad128x64_hbd_avx2);
+  out[BLOCK_16X8 as usize] = Some(rav1e_sad_16x8_hbd_avx2);
+  out[BLOCK_16X32 as usize] = Some(rav1e_sad_16x32_hbd_avx2);
+  out[BLOCK_32X16 as usize] = Some(rav1e_sad_32x16_hbd_avx2);
+  out[BLOCK_32X64 as usize] = Some(rav1e_sad_32x64_hbd_avx2);
+  out[BLOCK_64X32 as usize] = Some(rav1e_sad_64x32_hbd_avx2);
+  out[BLOCK_64X128 as usize] = Some(rav1e_sad_64x128_hbd_avx2);
+  out[BLOCK_128X64 as usize] = Some(rav1e_sad_128x64_hbd_avx2);
 
-  out[BLOCK_16X4 as usize] = Some(rav1e_sad16x4_hbd_avx2);
-  out[BLOCK_32X8 as usize] = Some(rav1e_sad32x8_hbd_avx2);
-  out[BLOCK_16X64 as usize] = Some(rav1e_sad16x64_hbd_avx2);
-  out[BLOCK_64X16 as usize] = Some(rav1e_sad64x16_hbd_avx2);
+  out[BLOCK_16X4 as usize] = Some(rav1e_sad_16x4_hbd_avx2);
+  out[BLOCK_32X8 as usize] = Some(rav1e_sad_32x8_hbd_avx2);
+  out[BLOCK_16X64 as usize] = Some(rav1e_sad_16x64_hbd_avx2);
+  out[BLOCK_64X16 as usize] = Some(rav1e_sad_64x16_hbd_avx2);
 
   out
 };

@@ -59,18 +59,65 @@ cglobal sad%1x%2_avg, 5, ARCH_X86_64 + %3, 6, src, src_stride, \
     pabsw               %4, %4
 %endmacro
 
-; unsigned int sad_16x16_hbd_avx2(uint16_t *src, i64 src_stride,
-;                                  uint16_t *ref, i64 ref_stride);
-%macro SADHBD16XN 1-2 0
-cglobal sad16x%1_hbd, 4, 7, 10, src, src_stride, ref, ref_stride, src_stride3, ref_stride3, n_rows
-    %if ARCH_X86_64
-    %define n_rowsd r7d
-    %else ; x86-32
-    %define n_rowsd dword r0m
-    %endif ; x86-32/64
+; Slightly faster, only valid for up to 64 rows of 12 bit or 256 rows of 10-bit.
+; unsigned int sad_16x16_hbd_max64_avx2(uint16_t *src, i64 src_stride,
+;                                  uint16_t *ref, i64 ref_stride, u64 n_rows);
+INIT_YMM avx2
+cglobal sad_16xN_hbd_max64, 5, 7, 11, src, src_stride, ref, ref_stride, n_rows, src_stride3, ref_stride3
     lea         src_stride3q, [src_strideq*3]
     lea         ref_stride3q, [ref_strideq*3]
-    mov            n_rowsd, %1 / 4
+    shr                n_rowsq, 2
+    %define            sum  m0
+    %define            sum2 m10
+    %define            zero m9
+    pxor               sum, sum
+    pxor                sum2, sum2
+    pxor                zero, zero
+.loop:
+    movu                m1, [srcq]
+    movu                m2, [srcq+src_strideq]
+    movu                m3, [srcq+src_strideq * 2]
+    movu                m4, [srcq+src_stride3q]
+    lea               srcq, [srcq+src_strideq*4]
+    movu                m5, [refq]
+    movu                m6, [refq+ref_strideq]
+    movu                m7, [refq+ref_strideq*2]
+    movu                m8, [refq+ref_stride3q]
+    lea               refq, [refq+ref_strideq*4]
+    W_ABS_DIFF         m1, m2, m3, m4, m5, m6, m7, m8
+    paddw               m1, m2
+    paddw               m3, m4
+    ; sum,sum2 add 2 ABSDIFF per iteration each
+    ; Each can fit 32 12-bit differences, therefore 16 iterations or 64 rows.
+    paddw               sum, m1
+    paddw               sum2, m3
+    dec               n_rowsq
+    jg .loop
+; Convert to 32-bits
+    punpcklwd           m2, sum, zero
+    punpcklwd           m4, sum2, zero
+    punpckhwd           sum, zero
+    punpckhwd           sum2, zero
+    paddd               sum, m2
+    paddd               sum2, m4
+    paddd               sum, sum2
+; Horizontal reduction
+    vextracti128       xm1, sum, 1
+    paddd              xm0, xm1
+    pshufd             xm1, xm0, 238
+    paddd              xm0, xm1
+    pshufd             xm1, xm0, 85
+    vpaddd             xm0, xm1
+    movd               eax, xm0
+    RET
+
+; unsigned int sad_16x16_hbd_avx2(uint16_t *src, i64 src_stride,
+;                                  uint16_t *ref, i64 ref_stride, u64 n_rows);
+INIT_YMM avx2
+cglobal sad_16xN_hbd, 5, 7, 10, src, src_stride, ref, ref_stride, n_rows, src_stride3, ref_stride3
+    lea         src_stride3q, [src_strideq*3]
+    lea         ref_stride3q, [ref_strideq*3]
+    shr                n_rowsq, 2
     %define            sum  m0
     pxor               sum, sum
     pxor                m9, m9
@@ -97,7 +144,7 @@ cglobal sad16x%1_hbd, 4, 7, 10, src, src_stride, ref, ref_stride, src_stride3, r
     paddd               m3, m4
     paddd              sum, m1
     paddd              sum, m3
-    dec               n_rowsd
+    dec               n_rowsq
     jg .loop
 ; Horizontal reduction
     vextracti128       xm1, sum, 1
@@ -108,26 +155,12 @@ cglobal sad16x%1_hbd, 4, 7, 10, src, src_stride, ref, ref_stride, src_stride3, r
     vpaddd             xm0, xm1
     movd               eax, xm0
     RET
-%endmacro
-
-INIT_YMM avx2
-SADHBD16XN 128 ; sad16x64_hbd_avx2
-SADHBD16XN 64 ; sad16x64_hbd_avx2
-SADHBD16XN 32 ; sad16x32_hbd_avx2
-SADHBD16XN 16 ; sad16x16_hbd_avx2
-SADHBD16XN 8 ; sad16x8_hbd_avx2
-SADHBD16XN 4 ; sad16x4_hbd_avx2
 
 ; unsigned int sad_32xN_hbd_avx2(uint16_t *src, i64 src_stride,
-;                                  uint16_t *ref, i64 ref_stride);
-%macro SADHBD32XN 1-2 0
-cglobal sad32x%1_hbd, 4, 5, 10, src, src_stride, ref, ref_stride, n_rows
-    %if ARCH_X86_64
-    %define n_rowsd r7d
-    %else ; x86-32
-    %define n_rowsd dword r0m
-    %endif ; x86-32/64
-    mov            n_rowsd, %1 / 2
+;                                  uint16_t *ref, i64 ref_stride, u64 n_rows);
+INIT_YMM avx2
+cglobal sad_32xN_hbd, 5, 5, 10, src, src_stride, ref, ref_stride, n_rows
+    shr            n_rowsq, 1
     %define            sum  m0
     pxor               sum, sum
     pxor                m9, m9
@@ -154,7 +187,7 @@ cglobal sad32x%1_hbd, 4, 5, 10, src, src_stride, ref, ref_stride, n_rows
     paddd               m3, m4
     paddd              sum, m1
     paddd              sum, m3
-    dec               n_rowsd
+    dec               n_rowsq
     jg .loop
 ; Horizontal reduction
     vextracti128       xm1, sum, 1
@@ -165,24 +198,11 @@ cglobal sad32x%1_hbd, 4, 5, 10, src, src_stride, ref, ref_stride, n_rows
     vpaddd             xm0, xm1
     movd               eax, xm0
     RET
-%endmacro
-
-INIT_YMM avx2
-SADHBD32XN 64 ; sad32x64_hbd_avx2
-SADHBD32XN 32 ; sad32x32_hbd_avx2
-SADHBD32XN 16 ; sad32x16_hbd_avx2
-SADHBD32XN 8 ; sad32x8_hbd_avx2
 
 ; unsigned int sad_64xN_hbd_avx2(uint16_t *src, i64 src_stride,
-;                                  uint16_t *ref, i64 ref_stride);
-%macro SADHBD64XN 1-2 0
-cglobal sad64x%1_hbd, 4, 5, 10, src, src_stride, ref, ref_stride, n_rows
-    %if ARCH_X86_64
-    %define n_rowsd r7d
-    %else ; x86-32
-    %define n_rowsd dword r0m
-    %endif ; x86-32/64
-    mov            n_rowsd, %1
+;                                  uint16_t *ref, i64 ref_stride, u64 n_rows);
+INIT_YMM avx2
+cglobal sad_64xN_hbd, 5, 5, 10, src, src_stride, ref, ref_stride, n_rows
     %define            sum  m0
     pxor               sum, sum
     pxor                m9, m9
@@ -209,7 +229,7 @@ cglobal sad64x%1_hbd, 4, 5, 10, src, src_stride, ref, ref_stride, n_rows
     paddd               m3, m4
     paddd              sum, m1
     paddd              sum, m3
-    dec               n_rowsd
+    dec               n_rowsq
     jg .loop
 ; Horizontal reduction
     vextracti128       xm1, sum, 1
@@ -220,13 +240,7 @@ cglobal sad64x%1_hbd, 4, 5, 10, src, src_stride, ref, ref_stride, n_rows
     vpaddd             xm0, xm1
     movd               eax, xm0
     RET
-%endmacro
 
-INIT_YMM avx2
-SADHBD64XN 128 ; sad64x128_hbd_avx2
-SADHBD64XN 64 ; sad64x64_hbd_avx2
-SADHBD64XN 32 ; sad64x32_hbd_avx2
-SADHBD64XN 16 ; sad64x16_hbd_avx2
 
 ; unsigned int aom_sad128x128_avx2(uint8_t *src, int src_stride,
 ;                                  uint8_t *ref, int ref_stride);
