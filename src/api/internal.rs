@@ -914,14 +914,16 @@ impl<T: Pixel> ContextInner<T> {
 
     lookahead_intra_costs_lines
       .zip(block_importances_lines)
+      .zip(me_stats.rows_iter().step_by(2))
       .enumerate()
-      .flat_map(|(y, (lookahead_intra_costs, block_importances))| {
+      .flat_map(|(y, ((lookahead_intra_costs, block_importances), me_stats_line))| {
         lookahead_intra_costs
           .iter()
           .zip(block_importances.iter())
+          .zip(me_stats_line.iter().step_by(2))
           .enumerate()
-          .map(move |(x, (&intra_cost, &future_importance))| {
-            let mv = me_stats[y * 2][x * 2].mv;
+          .map(move |(x, ((&intra_cost, &future_importance), &me_stat))| {
+            let mv = me_stat.mv;
 
             // Coordinates of the top-left corner of the reference block, in MV
             // units.
