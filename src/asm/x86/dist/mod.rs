@@ -130,7 +130,7 @@ unsafe fn rav1e_sad_KxN_hbd_avx2<const K : usize>(src: *const u16, src_stride: i
   } else {
     assert_eq!(K % MAX_SIZE, 0);
     let sum = 
-      (0..n_rows).flat_map(|n| {
+      (0..n_rows).flat_map(|_| {
         (0..(K / MAX_SIZE)).map(move |h| {
           let src = src.offset(src_stride + (h * MAX_SIZE * 2) as isize);
           let dst = dst.offset(dst_stride + (h * MAX_SIZE * 2) as isize);
