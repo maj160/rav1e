@@ -67,7 +67,7 @@ use std::arch::x86_64::*;
 
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn mm_sum_i32(ymm : __m256i) -> i32 {
+unsafe fn mm256_sum_i32(ymm : __m256i) -> i32 {
   // We split the vector in half and then add 2 + 3 -> 0 + 1, and finally 0 + 1.
   let m1 = _mm256_extracti128_si256(ymm, 1);
   let m2 = _mm256_castsi256_si128(ymm);
@@ -112,35 +112,32 @@ unsafe fn rav1e_sad_KxN_hbd_avx2_inner<const K : usize>(src: *const u8, src_stri
 #[inline]
 unsafe fn rav1e_sad_KxN_hbd_avx2<const K : usize>(src: *const u16, src_stride: isize, dst: *const u16, dst_stride: isize, n_rows : usize) -> u32 {
   const MAX_SIZE : usize = 256;
-  let mut src = src as *const u8;
-  let mut dst = dst as *const u8;
+  let src = src as *const u8;
+  let dst = dst as *const u8;
   if K <= MAX_SIZE {
     if K * n_rows <= MAX_SIZE {
-      return mm_sum_i32(rav1e_sad_KxN_hbd_avx2_inner::<K>(src, src_stride, dst, dst_stride, n_rows)) as u32
+      return mm256_sum_i32(rav1e_sad_KxN_hbd_avx2_inner::<K>(src, src_stride, dst, dst_stride, n_rows)) as u32
     }
     assert_eq!(MAX_SIZE % K, 0);
-    let mut sum = _mm256_setzero_si256();
-    let row_step = MAX_SIZE / K;
+    let row_step = (MAX_SIZE / K).min(n_rows);
     assert_eq!(n_rows % row_step, 0);
-    for w in 0..(n_rows / row_step) as isize {
+    let sum = (0..(n_rows / row_step) as isize).map(|w| {
       let src = src.offset(w * row_step as isize * src_stride);
       let dst = dst.offset(w * row_step as isize * dst_stride);
-      let res = rav1e_sad_KxN_hbd_avx2_inner::<K>(src, src_stride, dst, dst_stride, row_step);
-      sum = _mm256_add_epi32(sum, res);
-    }
-    mm_sum_i32(sum) as u32
+      rav1e_sad_KxN_hbd_avx2_inner::<K>(src, src_stride, dst, dst_stride, row_step)
+    }).reduce(|a,b| unsafe { _mm256_add_epi32(a,b) }).unwrap();
+    mm256_sum_i32(sum) as u32
   } else {
     assert_eq!(K % MAX_SIZE, 0);
-    let mut sum = _mm256_setzero_si256();
-      for _ in 0..(n_rows) {
-        for h in 0..(K / MAX_SIZE) {
-          let res = rav1e_sad_KxN_hbd_avx2_inner::<256>(src.add(h * MAX_SIZE * 2), src_stride, dst.add(h * MAX_SIZE * 2), dst_stride, 1);
-          sum = _mm256_add_epi32(sum, res);
-        }
-        src = src.offset(src_stride);
-        dst = dst.offset(dst_stride);
-      }
-    mm_sum_i32(sum) as u32
+    let sum = 
+      (0..n_rows).flat_map(|n| {
+        (0..(K / MAX_SIZE)).map(move |h| {
+          let src = src.offset(src_stride + (h * MAX_SIZE * 2) as isize);
+          let dst = dst.offset(dst_stride + (h * MAX_SIZE * 2) as isize);
+          rav1e_sad_KxN_hbd_avx2_inner::<MAX_SIZE>(src, src_stride, dst, dst_stride, 1)
+        })
+      }).reduce(|a,b| unsafe { _mm256_add_epi32(a,b) }).unwrap();
+    mm256_sum_i32(sum) as u32
   }
 }
 
