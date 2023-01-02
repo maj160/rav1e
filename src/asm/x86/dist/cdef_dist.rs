@@ -124,7 +124,6 @@ pub fn cdef_dist_kernel<T: Pixel>(
 
 /// Store functions in a 8x8 grid. Most will be empty.
 const CDEF_DIST_KERNEL_FNS_LENGTH: usize = 8 * 8;
-const CDEF_DIST_KERNEL_HBD_FNS_LENGTH: usize = 8 * 8;
 
 const fn kernel_fn_index(w: usize, h: usize) -> usize {
   ((w - 1) << 3) | (h - 1)
@@ -180,40 +179,34 @@ unsafe fn rav1e_cdef_dist_kernel_8x8_hbd_avx2 (
 
   unsafe fn sum16(src : *const u8, src_stride : isize) -> u32 {
     let h = 8;
-    let res = (0..h / 2).map(|row| {
-      let r1 = _mm_load_si128(src.offset(2 * row * src_stride) as *const _);
-      let r2 = _mm_load_si128(src.offset((2 * row + 1) * src_stride) as *const _);
-      _mm256_insertf128_si256(_mm256_castsi128_si256(r1), r2, 1)
-    }).reduce(|a,b| _mm256_add_epi16(a, b)).unwrap();
+    let res = (0..h).map(|row| {
+      _mm_load_si128(src.offset(row * src_stride) as *const _)
+    }).reduce(|a,b| _mm_add_epi16(a, b)).unwrap();
 
-    let m1 = _mm256_extracti128_si256(res, 1);
-    let m2 = _mm256_castsi256_si128(res);
-    let m32_1 = _mm256_cvtepi16_epi32(m1);
-    let m32_2 = _mm256_cvtepi16_epi32(m2);
-    let m32 = _mm256_add_epi32(m32_1, m32_2);
+    let m32 = _mm256_cvtepi16_epi32(res);
     mm256_sum_i32(m32) as u32
   }
-  unsafe fn sum_over32(f : impl Fn(__m256i, __m256i) -> __m256i, src : *const u8, src_stride : isize, dst : *const u8, dst_stride : isize) -> u32 {
+  unsafe fn mpadd32(src : *const u8, src_stride : isize, dst : *const u8, dst_stride : isize) -> u32 {
     let h = 8;
     let res = (0..h / 2).map(|row| {
       let s1 = _mm_load_si128(src.offset(2 * row * src_stride) as *const _);
       let s2 = _mm_load_si128(src.offset((2 * row + 1) * src_stride) as *const _);
-      let s = _mm256_insertf128_si256(_mm256_castsi128_si256(s1), s2, 1);
+      let s = _mm256_inserti128_si256(_mm256_castsi128_si256(s1), s2, 1);
       
       let d1 = _mm_load_si128(dst.offset(2 * row * dst_stride) as *const _);
       let d2 = _mm_load_si128(dst.offset((2 * row + 1) * dst_stride) as *const _);
-      let d = _mm256_insertf128_si256(_mm256_castsi128_si256(d1), d2, 1);
+      let d = _mm256_inserti128_si256(_mm256_castsi128_si256(d1), d2, 1);
 
-      f(s, d)
+      _mm256_madd_epi16(s, d)
     }).reduce(|a,b| _mm256_add_epi32(a, b)).unwrap();
     mm256_sum_i32(res) as u32
   }
 
   let sum_s = sum16(src, src_stride);
   let sum_d = sum16(dst, dst_stride);
-  let sum_s2 = sum_over32(|s,d| _mm256_madd_epi16(s, s), src, src_stride, dst, dst_stride);
-  let sum_d2 = sum_over32(|s,d| _mm256_madd_epi16(d, d), src, src_stride, dst, dst_stride);
-  let sum_sd = sum_over32(|s,d| _mm256_madd_epi16(s, d), src, src_stride, dst, dst_stride);
+  let sum_s2 = mpadd32(src, src_stride, src, src_stride);
+  let sum_d2 = mpadd32(dst, dst_stride, dst, dst_stride);
+  let sum_sd = mpadd32(src, src_stride, dst, dst_stride);
   
   // To get the distortion, compute sum of squared error and apply a weight
   // based on the variance of the two planes.
@@ -241,8 +234,8 @@ static CDEF_DIST_KERNEL_HBD_FNS_AVX2: [Option<CdefDistKernelHBDFn>;
 
 cpu_function_lookup_table!(
   CDEF_DIST_KERNEL_HBD_FNS:
-    [[Option<CdefDistKernelHBDFn>; CDEF_DIST_KERNEL_HBD_FNS_LENGTH]],
-  default: [None; CDEF_DIST_KERNEL_HBD_FNS_LENGTH],
+    [[Option<CdefDistKernelHBDFn>; CDEF_DIST_KERNEL_FNS_LENGTH]],
+  default: [None; CDEF_DIST_KERNEL_FNS_LENGTH],
   [AVX2]
 );
 
