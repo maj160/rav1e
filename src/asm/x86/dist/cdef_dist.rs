@@ -189,13 +189,15 @@ unsafe fn rav1e_cdef_dist_kernel_8x8_hbd_avx2 (
   unsafe fn mpadd32(src : *const u8, src_stride : isize, dst : *const u8, dst_stride : isize) -> u32 {
     let h = 8;
     let res = (0..h / 2).map(|row| {
-      let s1 = _mm_load_si128(src.offset(2 * row * src_stride) as *const _);
-      let s2 = _mm_load_si128(src.offset((2 * row + 1) * src_stride) as *const _);
-      let s = _mm256_inserti128_si256(_mm256_castsi128_si256(s1), s2, 1);
-      
-      let d1 = _mm_load_si128(dst.offset(2 * row * dst_stride) as *const _);
-      let d2 = _mm_load_si128(dst.offset((2 * row + 1) * dst_stride) as *const _);
-      let d = _mm256_inserti128_si256(_mm256_castsi128_si256(d1), d2, 1);
+      let s = _mm256_loadu2_m128i(
+        src.offset(2 * row * src_stride) as *const _,
+         src.offset((2 * row + 1) * src_stride) as *const _
+      );
+
+      let d = _mm256_loadu2_m128i(
+        dst.offset(2 * row * dst_stride) as *const _,
+      dst.offset((2 * row + 1) * dst_stride) as *const _
+      );
 
       _mm256_madd_epi16(s, d)
     }).reduce(|a,b| _mm256_add_epi32(a, b)).unwrap();
