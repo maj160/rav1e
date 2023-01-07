@@ -42,7 +42,7 @@ unsafe fn m256_divu_pair_32(x: __m256i, d: (__m256i, __m256i, __m128i)) -> __m25
   let lower = _mm256_srli_epi64(_mm256_mul_epu32(a, lower), 32);
   let upper = _mm256_mul_epu32(a, upper);
 
-  let ret = _mm256_blend_epi16(lower, upper, 0xCC);
+  let ret = _mm256_blend_epi32(lower, upper, 0xAA);
   _mm256_srl_epi32(ret, shift)
 }
 
@@ -416,7 +416,7 @@ impl QuantizationContext {
       let mut ptr = bounds.start as *const u8;
       let mut output = qcoeffs[..eob].as_mut_ptr() as *mut u8;
 
-      let mut prev_level_mode = 0i32;
+      let mut next_level_mode = 0i32;
 
       
       let mul = _mm256_set1_epi32(self.ac_mul_add.0 as i32);
@@ -513,22 +513,23 @@ pub mod rust {
   use crate::cpu_features::CpuFeatureLevel;
 
   pub fn dequantize<T: Coefficient>(
-    qindex: u8, coeffs: &[T], _eob: usize, rcoeffs: &mut [T], tx_size: TxSize,
+    qindex: u8, coeffs: &[T], _eob: usize, rcoeffs: &mut [T], tx_size: TxSize, tx_type: TxType,
     bit_depth: usize, dc_delta_q: i8, ac_delta_q: i8, _cpu: CpuFeatureLevel,
   ) {
+    let scan = av1_scan_orders[tx_size as usize][tx_type as usize].scan;
     let log_tx_scale = get_log_tx_scale(tx_size) as i32;
     let offset = (1 << log_tx_scale) - 1;
 
     let dc_quant = dc_q(qindex, dc_delta_q, bit_depth) as i32;
     let ac_quant = ac_q(qindex, ac_delta_q, bit_depth) as i32;
 
-    for (i, (r, c)) in rcoeffs
-      .iter_mut()
-      .zip(coeffs.iter().map(|&c| i32::cast_from(c)))
+    for (i, (&scan, c)) in scan
+      .iter()
+      .zip(coeffs.iter().map(|&c| i32::cast_from(c) as i64))
       .enumerate()
     {
       let quant = if i == 0 { dc_quant } else { ac_quant };
-      *r = T::cast_from((c * quant + ((c >> 31) & offset)) >> log_tx_scale);
+      rcoeffs[scan as usize] = T::cast_from(((c * quant as i64 + ((c >> 31) & offset)) >> log_tx_scale) as i32);
     }
   }
 }

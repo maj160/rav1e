@@ -14,7 +14,9 @@ use std::arch::x86_64::*;
 
 use crate::context::av1_get_coded_tx_size;
 use crate::cpu_features::CpuFeatureLevel;
+use crate::prelude::TxType;
 use crate::quantize::*;
+use crate::scan_order::av1_scan_orders;
 use crate::transform::TxSize;
 use crate::util::*;
 
@@ -24,6 +26,7 @@ type DequantizeFn = unsafe fn(
   _eob: usize,
   rcoeffs_ptr: *mut i16,
   tx_size: TxSize,
+  tx_type: TxType,
   bit_depth: usize,
   dc_delta_q: i8,
   ac_delta_q: i8,
@@ -35,14 +38,33 @@ cpu_function_lookup_table!(
   [(AVX2, Some(dequantize_avx2))]
 );
 
+
+type DequantizeHBDFn = unsafe fn(
+  qindex: u8,
+  coeffs_ptr: *const i32,
+  _eob: usize,
+  rcoeffs_ptr: *mut i32,
+  tx_size: TxSize,
+  tx_type: TxType,
+  bit_depth: usize,
+  dc_delta_q: i8,
+  ac_delta_q: i8,
+);
+
+cpu_function_lookup_table!(
+  DEQUANTIZE_HBD_FNS: [Option<DequantizeHBDFn>],
+  default: None,
+  [(AVX2, Some(dequantize_hbd_avx2))]
+);
+
 #[inline(always)]
 pub fn dequantize<T: Coefficient>(
   qindex: u8, coeffs: &[T], eob: usize, rcoeffs: &mut [T], tx_size: TxSize,
-  bit_depth: usize, dc_delta_q: i8, ac_delta_q: i8, cpu: CpuFeatureLevel,
+  tx_type: TxType, bit_depth: usize, dc_delta_q: i8, ac_delta_q: i8, cpu: CpuFeatureLevel,
 ) {
   let call_rust = |rcoeffs: &mut [T]| {
     crate::quantize::rust::dequantize(
-      qindex, coeffs, eob, rcoeffs, tx_size, bit_depth, dc_delta_q,
+      qindex, coeffs, eob, rcoeffs, tx_size, tx_type, bit_depth, dc_delta_q,
       ac_delta_q, cpu,
     );
   };
@@ -67,6 +89,7 @@ pub fn dequantize<T: Coefficient>(
             eob,
             rcoeffs.as_mut_ptr() as *mut _,
             tx_size,
+            tx_type,
             bit_depth,
             dc_delta_q,
             ac_delta_q,
@@ -76,7 +99,26 @@ pub fn dequantize<T: Coefficient>(
         call_rust(rcoeffs)
       }
     }
-    PixelType::U16 => call_rust(rcoeffs),
+    PixelType::U16 => {
+      if let Some(func) = DEQUANTIZE_HBD_FNS[cpu.as_index()] {
+        // SAFETY: Calls Assembly code.
+        unsafe {
+          (func)(
+            qindex,
+            coeffs.as_ptr() as *const _,
+            eob,
+            rcoeffs.as_mut_ptr() as *mut _,
+            tx_size,
+            tx_type,
+            bit_depth,
+            dc_delta_q,
+            ac_delta_q,
+          )
+        }
+      } else {
+        call_rust(rcoeffs)
+      }
+    }
   }
 
   #[cfg(any(feature = "check_asm", test))]
@@ -88,9 +130,10 @@ pub fn dequantize<T: Coefficient>(
 
 #[target_feature(enable = "avx2")]
 unsafe fn dequantize_avx2(
-  qindex: u8, coeffs_ptr: *const i16, _eob: usize, rcoeffs_ptr: *mut i16,
-  tx_size: TxSize, bit_depth: usize, dc_delta_q: i8, ac_delta_q: i8,
+  qindex: u8, coeffs_ptr: *const i16, eob: usize, rcoeffs_ptr: *mut i16,
+  tx_size: TxSize, tx_type: TxType, bit_depth: usize, dc_delta_q: i8, ac_delta_q: i8,
 ) {
+  let scan = av1_scan_orders[tx_size as usize][tx_type as usize].scan;
   let log_tx_scale = _mm256_set1_epi32(get_log_tx_scale(tx_size) as i32);
 
   let quants_ac =
@@ -109,8 +152,9 @@ unsafe fn dequantize_avx2(
 
   // Increase the pointers as we iterate
   let mut coeffs_ptr: *const i16 = coeffs_ptr;
-  let mut rcoeffs_ptr: *mut i16 = rcoeffs_ptr;
-  for _i in (0..area).step_by(step) {
+  let mut scan_ptr: *const u16 = scan.as_ptr();
+  let scan_end = scan_ptr.add(eob);
+  for i in (0..eob).step_by(step) {
     let coeffs = _mm256_load_si256(coeffs_ptr as *const _);
     let coeffs_abs = _mm256_abs_epi16(coeffs);
 
@@ -143,18 +187,108 @@ unsafe fn dequantize_avx2(
       ),
       coeffs,
     );
-    _mm256_store_si256(rcoeffs_ptr as *mut _, rcoeffs);
+    let mut tmp_rcoeffs = [0i16; 16];
+    _mm256_store_si256(tmp_rcoeffs.as_mut_ptr() as *mut _, rcoeffs);
+    for idx in 0..step {
+      let s = scan_ptr.add(idx);
+      if s < scan_end {
+        *rcoeffs_ptr.add(*s as usize) = tmp_rcoeffs[idx];
+      }
+    }
 
     // Only use a dc quantizer for the first iteration
     quants = quants_ac;
     coeffs_ptr = coeffs_ptr.add(step);
-    rcoeffs_ptr = rcoeffs_ptr.add(step);
+    scan_ptr = scan_ptr.add(step);
   }
 }
 
+
+#[target_feature(enable = "avx2")]
+unsafe fn dequantize_hbd_avx2(
+  qindex: u8, coeffs_ptr: *const i32, eob: usize, rcoeffs_ptr: *mut i32,
+  tx_size: TxSize, tx_type: TxType, bit_depth: usize, dc_delta_q: i8, ac_delta_q: i8,
+) {
+  let scan = av1_scan_orders[tx_size as usize][tx_type as usize].scan;
+  let log_tx_scale = _mm256_set1_epi64x(get_log_tx_scale(tx_size) as i64);
+
+  let quants_ac =
+    _mm256_set1_epi32(ac_q(qindex, ac_delta_q, bit_depth) as i32);
+  // Use the dc quantize as first vector element for the first iteration
+  let mut quants = _mm256_insert_epi32(
+    quants_ac,
+    dc_q(qindex, dc_delta_q, bit_depth) as i32,
+    0,
+  );
+
+  let area: usize = av1_get_coded_tx_size(tx_size).area();
+  // Step by 8 (256/32) coefficients for each iteration
+  let step: usize = 8;
+  assert!(area >= step);
+
+  // Increase the pointers as we iterate
+  let mut coeffs_ptr: *const i32 = coeffs_ptr;
+  let mut scan_ptr: *const u16 = scan.as_ptr();
+  let scan_end = scan_ptr.add(eob);
+  for i in (0..eob).step_by(step) {
+    let coeffs = _mm256_load_si256(coeffs_ptr as *const _);
+    let coeffs_abs = _mm256_abs_epi32(coeffs);
+
+    // TODO: Since log_tx_scale is at most 2 and we gain an extra bit by taking
+    // the abs value (unless the range is [-(2^15), 2^15 + 1]), it might be
+    // possible to perform a 16-bit multiply and get the highest bit by
+    // comparing coeffs to (1<<16) / quant. The would cost 1 compare, 1 blend,
+    // and 1 add, but would get rid of 1 pack, 2 unpacks, 1 shift, and 1
+    // multiply.
+
+    let rcoeffs = _mm256_sign_epi32(
+    _mm256_blend_epi32(
+        // (abs_coeff * quant) >> log_tx_scale
+          _mm256_srlv_epi64(
+            _mm256_mul_epi32(
+              quants,
+              // Convert the first half of each lane to 32-bits
+              coeffs_abs,
+            ),
+            log_tx_scale,
+          ),
+        // Upper half
+        _mm256_slli_epi64(
+          _mm256_srlv_epi64(
+            _mm256_mul_epi32(
+              quants_ac,
+              _mm256_srli_epi64(coeffs_abs, 32),
+            ),
+            log_tx_scale,
+          ),
+          32
+        ),
+        0xAA
+      ),
+      coeffs,
+    );
+    let mut tmp_rcoeffs = [0i32; 8];
+    _mm256_store_si256(tmp_rcoeffs.as_mut_ptr() as *mut _, rcoeffs);
+    for idx in 0..step {
+      let s = scan_ptr.add(idx);
+      if s < scan_end {
+        *rcoeffs_ptr.add(*s as usize) = tmp_rcoeffs[idx];
+      }
+    }
+
+    // Only use a dc quantizer for the first iteration
+    quants = quants_ac;
+    coeffs_ptr = coeffs_ptr.add(step);
+    scan_ptr = scan_ptr.add(step);
+  }
+}
+
+
 #[cfg(test)]
 mod test {
-  use super::*;
+  use crate::prelude::TxType;
+
+use super::*;
   use rand::distributions::{Distribution, Uniform};
   use rand::{thread_rng, Rng};
 
@@ -206,7 +340,33 @@ mod test {
           eob,
           &mut rcoeffs.data,
           tx_size,
+          TxType::IDTX,
           bd,
+          0,
+          0,
+          CpuFeatureLevel::default(),
+        );
+
+
+        let mut qcoeffs = Aligned::new([0i32; 32 * 32]);
+        let mut rcoeffs = Aligned::new([0i32; 32 * 32]);
+
+        // Generate quantized coefficients up to the eob
+        let between = Uniform::from(-i32::MAX..=i32::MAX);
+        for (i, qcoeff) in qcoeffs.data.iter_mut().enumerate().take(eob) {
+          *qcoeff = between.sample(&mut rng)
+            / if i == 0 { dc_quant } else { ac_quant } as i32;
+        }
+
+        // Rely on quantize's internal tests
+        dequantize(
+          qindex,
+          &qcoeffs.data,
+          eob,
+          &mut rcoeffs.data,
+          tx_size,
+          TxType::IDTX,
+          12,
           0,
           0,
           CpuFeatureLevel::default(),

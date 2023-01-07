@@ -1501,22 +1501,19 @@ pub fn encode_tx_block<T: Pixel, W: Writer>(
   let mut qcoeffs_storage: Aligned<[MaybeUninit<T::Coeff>; 32 * 32]> =
     unsafe { Aligned::uninitialized() };
   // SAFETY: We write to the array below before reading from it.
-  let mut rcoeffs_storage: Aligned<[T::Coeff; 32 * 32]> =
+  let mut rcoeffs_storage: Aligned<[MaybeUninit<T::Coeff>; 32 * 32]> =
     unsafe { Aligned::uninitialized() };
   // SAFETY: We write to the array below before reading from it.
-  let mut raster_qcoeffs_storage: Aligned<[MaybeUninit<T::Coeff>; 32 * 32]> =
-    unsafe { Aligned::uninitialized() };
   let residual = &mut residual_storage.data[..tx_size.area()];
   let coeffs = &mut coeffs_storage.data[..tx_size.area()];
+  let rcoeffs = init_slice_repeat_mut(
+    &mut rcoeffs_storage.data[..coded_tx_area],
+    T::Coeff::cast_from(0),
+  );
   let qcoeffs = init_slice_repeat_mut(
     &mut qcoeffs_storage.data[..coded_tx_area],
     T::Coeff::cast_from(0),
   );
-  let raster_qcoeffs = init_slice_repeat_mut(
-    &mut raster_qcoeffs_storage.data[..coded_tx_area],
-    T::Coeff::cast_from(0),
-  );
-  let rcoeffs = &mut rcoeffs_storage.data[..coded_tx_area];
 
   let (visible_tx_w, visible_tx_h) = clip_visible_bsize(
     (fi.width + xdec) >> xdec,
@@ -1579,19 +1576,15 @@ pub fn encode_tx_block<T: Pixel, W: Writer>(
     true
   };
 
-  let scan = av1_scan_orders[tx_size as usize][tx_type as usize].scan;
-  
-  for (&pos, qcoeff) in scan.iter().zip(qcoeffs) {
-    unsafe { *raster_qcoeffs.get_unchecked_mut(pos as usize) = *qcoeff };
-  }
 
   // Reconstruct
   dequantize(
     qidx,
-    raster_qcoeffs,
+    qcoeffs,
     eob,
     rcoeffs,
     tx_size,
+    tx_type,
     fi.sequence.bit_depth,
     fi.dc_delta_q[p],
     fi.ac_delta_q[p],
